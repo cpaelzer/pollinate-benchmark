@@ -337,6 +337,21 @@ def collect_one_attempt(
         )
         check_attempt_budget()
 
+    log("  Resetting SSH host keys and cloud-init state for fresh boot behavior...")
+    run_with_retries(
+        lambda: lxc_guest_cmd(vm_name, "sudo -n rm -f /etc/ssh/ssh_host_*", timeout=60, check=True),
+        retries,
+        retry_delay,
+        "remove SSH host keys",
+    )
+    run_with_retries(
+        lambda: lxc_guest_cmd(vm_name, "sudo -n cloud-init clean", timeout=60, check=True),
+        retries,
+        retry_delay,
+        "cloud-init clean",
+    )
+    check_attempt_budget()
+
     old_boot_id = run_with_retries(
         lambda: get_boot_id(vm_name),
         retries,
