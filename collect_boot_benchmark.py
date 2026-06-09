@@ -262,6 +262,42 @@ def parse_cpu_nsec(output: str) -> Optional[int]:
     return int(m.group(1))
 
 
+def get_boot_id(vm_name: str) -> str:
+    result = lxc_guest_cmd(vm_name, "cat /proc/sys/kernel/random/boot_id", timeout=30, check=True)
+    boot_id = result.out.strip()
+    if not boot_id:
+        raise RuntimeError("Empty boot_id returned from guest")
+    return boot_id
+
+
+def wait_for_new_boot_id(vm_name: str, old_boot_id: str, timeout_seconds: int, retry_delay: int) -> str:
+    """Wait until the guest reports a boot_id different from old_boot_id.
+
+    This guards against measuring the previous boot when reconnect happens too
+    quickly during a reboot transition.
+    """
+    log(f"  Verifying reboot completion via boot_id transition (old={old_boot_id})...")
+    t0 = time.monotonic()
+    deadline = t0 + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            current_boot_id = get_boot_id(vm_name)
+            if current_boot_id != old_boot_id:
+                log(
+                    f"  boot_id changed: {old_boot_id} -> {current_boot_id} "
+                    f"({time.monotonic() - t0:.0f}s elapsed)"
+                )
+                return current_boot_id
+            log("  boot_id unchanged; still observing previous boot, waiting...")
+        except Exception as exc:
+            log(f"  boot_id probe failed while waiting for reboot completion: {exc}", "WARN")
+        time.sleep(retry_delay)
+    raise RuntimeError(
+        f"boot_id did not change within {timeout_seconds}s after reboot; "
+        f"still appears to be old boot {old_boot_id}"
+    )
+
+
 def collect_one_attempt(
     vm_name: str,
     mode: str,
@@ -271,6 +307,7 @@ def collect_one_attempt(
     retry_delay: int,
     wait_timeout: int,
     attempt_timeout: int,
+    post_reboot_delay: int,
 ) -> Dict:
     mode_label = "A (pollinate skipped – seeded file intact)" if mode == "a" else "B (pollinate active – seeded file removed)"
     log(f"--- Attempt {attempt_no} mode={mode} ({mode_label}) ---")
@@ -294,11 +331,23 @@ def collect_one_attempt(
         )
         check_attempt_budget()
 
+    old_boot_id = run_with_retries(
+        lambda: get_boot_id(vm_name),
+        retries,
+        retry_delay,
+        "read pre-reboot boot_id",
+    )
+    log(f"  Current boot_id before reboot: {old_boot_id}")
+
     log(f"  Sending reboot to guest '{vm_name}'...")
     reboot = run_cmd(["lxc", "exec", vm_name, "--", "bash", "-lc", "sudo -n reboot"], check=False, timeout=30)
     write_text(mode_dir / "reboot.stdout.log", reboot.out)
     write_text(mode_dir / "reboot.stderr.log", reboot.err)
     log(f"  Reboot command returned rc={reboot.rc} (non-zero is normal as the connection drops during shutdown)")
+
+    log(f"  Sleeping {post_reboot_delay}s to let shutdown/reboot transition begin...")
+    time.sleep(post_reboot_delay)
+    check_attempt_budget()
 
     run_with_retries(
         lambda: wait_for_guest(vm_name, wait_timeout),
@@ -306,6 +355,9 @@ def collect_one_attempt(
         retry_delay,
         "wait for guest readiness",
     )
+
+    new_boot_id = wait_for_new_boot_id(vm_name, old_boot_id, wait_timeout, retry_delay)
+    log(f"  Reboot validated with new boot_id: {new_boot_id}")
     check_attempt_budget()
 
     log("  Collecting systemd-analyze time...")
@@ -385,6 +437,12 @@ def main():
     parser.add_argument("--retries", type=int, default=5)
     parser.add_argument("--retry-delay", type=int, default=10)
     parser.add_argument("--attempt-timeout", type=int, default=420)
+    parser.add_argument(
+        "--post-reboot-delay",
+        type=int,
+        default=20,
+        help="Seconds to wait after issuing reboot before reconnect checks (default: 20)",
+    )
     args = parser.parse_args()
 
     # Restore terminal on exit in case a subprocess (e.g. sudo) left it in raw mode.
@@ -403,6 +461,7 @@ def main():
     log(f"skip_prep     : {args.skip_prep}")
     log(f"wait_timeout  : {args.wait_timeout}s  retries={args.retries}  retry_delay={args.retry_delay}s")
     log(f"attempt_timeout: {args.attempt_timeout}s")
+    log(f"post_reboot_delay: {args.post_reboot_delay}s")
 
     # Preflight: verify lxc is available.
     if shutil.which("lxc") is None:
@@ -467,6 +526,7 @@ def main():
                 retry_delay=args.retry_delay,
                 wait_timeout=args.wait_timeout,
                 attempt_timeout=args.attempt_timeout,
+                post_reboot_delay=args.post_reboot_delay,
             )
             success[mode] += 1
             append_jsonl(attempts_log, metadata)
