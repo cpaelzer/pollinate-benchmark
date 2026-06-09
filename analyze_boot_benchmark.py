@@ -6,6 +6,9 @@ import statistics
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+MODE_NO_POLLINATE = "no-pollinate"
+MODE_POLLINATED = "pollinated"
+
 
 def read_mode_metadata(mode_dir: Path) -> List[Dict]:
     rows = []
@@ -111,49 +114,102 @@ def fmt_nsec(v: float) -> str:
 
 def print_metric_block(title: str, a_stats: Dict, b_stats: Dict, formatter):
     print(title)
-    print(f"  mode_a raw_count={a_stats['raw']['count']} filtered_count={a_stats['filtered']['count']} removed={a_stats['filter']['removed']}")
-    print(f"    mode_a mean={formatter(a_stats['filtered']['mean']) if a_stats['filtered']['mean'] is not None else 'n/a'}")
-    print(f"    mode_a median={formatter(a_stats['filtered']['median']) if a_stats['filtered']['median'] is not None else 'n/a'}")
-    print(f"    mode_a stddev={formatter(a_stats['filtered']['stddev']) if a_stats['filtered']['stddev'] is not None else 'n/a'}")
-    print(f"  mode_b raw_count={b_stats['raw']['count']} filtered_count={b_stats['filtered']['count']} removed={b_stats['filter']['removed']}")
-    print(f"    mode_b mean={formatter(b_stats['filtered']['mean']) if b_stats['filtered']['mean'] is not None else 'n/a'}")
-    print(f"    mode_b median={formatter(b_stats['filtered']['median']) if b_stats['filtered']['median'] is not None else 'n/a'}")
-    print(f"    mode_b stddev={formatter(b_stats['filtered']['stddev']) if b_stats['filtered']['stddev'] is not None else 'n/a'}")
+    print(
+        f"  {MODE_NO_POLLINATE} raw_count={a_stats['raw']['count']} "
+        f"filtered_count={a_stats['filtered']['count']} removed={a_stats['filter']['removed']}"
+    )
+    print(
+        f"    {MODE_NO_POLLINATE} mean="
+        f"{formatter(a_stats['filtered']['mean']) if a_stats['filtered']['mean'] is not None else 'n/a'}"
+    )
+    print(
+        f"    {MODE_NO_POLLINATE} median="
+        f"{formatter(a_stats['filtered']['median']) if a_stats['filtered']['median'] is not None else 'n/a'}"
+    )
+    print(
+        f"    {MODE_NO_POLLINATE} stddev="
+        f"{formatter(a_stats['filtered']['stddev']) if a_stats['filtered']['stddev'] is not None else 'n/a'}"
+    )
+    print(
+        f"  {MODE_POLLINATED} raw_count={b_stats['raw']['count']} "
+        f"filtered_count={b_stats['filtered']['count']} removed={b_stats['filter']['removed']}"
+    )
+    print(
+        f"    {MODE_POLLINATED} mean="
+        f"{formatter(b_stats['filtered']['mean']) if b_stats['filtered']['mean'] is not None else 'n/a'}"
+    )
+    print(
+        f"    {MODE_POLLINATED} median="
+        f"{formatter(b_stats['filtered']['median']) if b_stats['filtered']['median'] is not None else 'n/a'}"
+    )
+    print(
+        f"    {MODE_POLLINATED} stddev="
+        f"{formatter(b_stats['filtered']['stddev']) if b_stats['filtered']['stddev'] is not None else 'n/a'}"
+    )
 
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze pollinate boot benchmark artifacts")
-    parser.add_argument("run_dir", help="Path to a collector run directory containing mode_a and mode_b")
+    parser.add_argument(
+        "run_dir",
+        help="Path to a collector run directory containing no-pollinate and pollinated",
+    )
     parser.add_argument("--min-retain-fraction", type=float, default=0.70)
     parser.add_argument("--min-retain-count", type=int, default=20)
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
-    mode_a_rows = read_mode_metadata(run_dir / "mode_a")
-    mode_b_rows = read_mode_metadata(run_dir / "mode_b")
+    no_pollinate_dir = run_dir / MODE_NO_POLLINATE
+    pollinated_dir = run_dir / MODE_POLLINATED
 
-    total_a = mode_stats(mode_a_rows, "total_s", args.min_retain_fraction, args.min_retain_count)
-    total_b = mode_stats(mode_b_rows, "total_s", args.min_retain_fraction, args.min_retain_count)
+    if not no_pollinate_dir.exists() or not pollinated_dir.exists():
+        raise SystemExit(
+            "Expected both 'no-pollinate' and 'pollinated' directories in run_dir"
+        )
 
-    kernel_a = mode_stats(mode_a_rows, "kernel_s", args.min_retain_fraction, args.min_retain_count)
-    kernel_b = mode_stats(mode_b_rows, "kernel_s", args.min_retain_fraction, args.min_retain_count)
+    no_pollinate_rows = read_mode_metadata(no_pollinate_dir)
+    pollinated_rows = read_mode_metadata(pollinated_dir)
 
-    user_a = mode_stats(mode_a_rows, "userspace_s", args.min_retain_fraction, args.min_retain_count)
-    user_b = mode_stats(mode_b_rows, "userspace_s", args.min_retain_fraction, args.min_retain_count)
+    total_no_pollinate = mode_stats(no_pollinate_rows, "total_s", args.min_retain_fraction, args.min_retain_count)
+    total_pollinated = mode_stats(pollinated_rows, "total_s", args.min_retain_fraction, args.min_retain_count)
 
-    pollinate_b = mode_stats(mode_b_rows, "pollinate_cpu_nsec", args.min_retain_fraction, args.min_retain_count)
+    kernel_no_pollinate = mode_stats(no_pollinate_rows, "kernel_s", args.min_retain_fraction, args.min_retain_count)
+    kernel_pollinated = mode_stats(pollinated_rows, "kernel_s", args.min_retain_fraction, args.min_retain_count)
+
+    user_no_pollinate = mode_stats(no_pollinate_rows, "userspace_s", args.min_retain_fraction, args.min_retain_count)
+    user_pollinated = mode_stats(pollinated_rows, "userspace_s", args.min_retain_fraction, args.min_retain_count)
+
+    pollinate_cpu_pollinated = mode_stats(
+        pollinated_rows,
+        "pollinate_cpu_nsec",
+        args.min_retain_fraction,
+        args.min_retain_count,
+    )
 
     print(f"run_dir={run_dir}")
     print("Boot statistics after IQR filtering (guardrails applied)")
-    print_metric_block("Total boot time", total_a, total_b, fmt_seconds)
-    print_metric_block("Kernel boot time", kernel_a, kernel_b, fmt_seconds)
-    print_metric_block("Userspace boot time", user_a, user_b, fmt_seconds)
+    print_metric_block("Total boot time", total_no_pollinate, total_pollinated, fmt_seconds)
+    print_metric_block("Kernel boot time", kernel_no_pollinate, kernel_pollinated, fmt_seconds)
+    print_metric_block("Userspace boot time", user_no_pollinate, user_pollinated, fmt_seconds)
 
-    print("Pollinate CPU usage (mode_b only)")
-    print(f"  mode_b raw_count={pollinate_b['raw']['count']} filtered_count={pollinate_b['filtered']['count']} removed={pollinate_b['filter']['removed']}")
-    print(f"    mode_b mean={fmt_nsec(pollinate_b['filtered']['mean']) if pollinate_b['filtered']['mean'] is not None else 'n/a'}")
-    print(f"    mode_b median={fmt_nsec(pollinate_b['filtered']['median']) if pollinate_b['filtered']['median'] is not None else 'n/a'}")
-    print(f"    mode_b stddev={fmt_nsec(pollinate_b['filtered']['stddev']) if pollinate_b['filtered']['stddev'] is not None else 'n/a'}")
+    print(f"Pollinate CPU usage ({MODE_POLLINATED} only)")
+    print(
+        f"  {MODE_POLLINATED} raw_count={pollinate_cpu_pollinated['raw']['count']} "
+        f"filtered_count={pollinate_cpu_pollinated['filtered']['count']} "
+        f"removed={pollinate_cpu_pollinated['filter']['removed']}"
+    )
+    print(
+        f"    {MODE_POLLINATED} mean="
+        f"{fmt_nsec(pollinate_cpu_pollinated['filtered']['mean']) if pollinate_cpu_pollinated['filtered']['mean'] is not None else 'n/a'}"
+    )
+    print(
+        f"    {MODE_POLLINATED} median="
+        f"{fmt_nsec(pollinate_cpu_pollinated['filtered']['median']) if pollinate_cpu_pollinated['filtered']['median'] is not None else 'n/a'}"
+    )
+    print(
+        f"    {MODE_POLLINATED} stddev="
+        f"{fmt_nsec(pollinate_cpu_pollinated['filtered']['stddev']) if pollinate_cpu_pollinated['filtered']['stddev'] is not None else 'n/a'}"
+    )
 
 
 if __name__ == "__main__":

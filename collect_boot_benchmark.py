@@ -46,6 +46,8 @@ echo "==> Base environment minimized. Ready for benchmark."
 """
 
 DURATION_RE = re.compile(r"([0-9]*\.?[0-9]+)(us|ms|s|min|h)")
+MODE_NO_POLLINATE = "no-pollinate"
+MODE_POLLINATED = "pollinated"
 
 
 @dataclass
@@ -309,10 +311,14 @@ def collect_one_attempt(
     attempt_timeout: int,
     post_reboot_delay: int,
 ) -> Dict:
-    mode_label = "A (pollinate skipped – seeded file intact)" if mode == "a" else "B (pollinate active – seeded file removed)"
+    mode_label = (
+        "pollinate skipped (seeded file intact)"
+        if mode == MODE_NO_POLLINATE
+        else "pollinate active (seeded file removed)"
+    )
     log(f"--- Attempt {attempt_no} mode={mode} ({mode_label}) ---")
     started = time.time()
-    mode_dir = out_dir / ("mode_a" if mode == "a" else "mode_b") / f"attempt_{attempt_no:04d}"
+    mode_dir = out_dir / mode / f"attempt_{attempt_no:04d}"
     mode_dir.mkdir(parents=True, exist_ok=True)
     log(f"  Artifacts: {mode_dir}")
 
@@ -321,7 +327,7 @@ def collect_one_attempt(
         if elapsed > attempt_timeout:
             raise RuntimeError(f"Attempt {attempt_no} exceeded timeout of {attempt_timeout}s ({elapsed:.0f}s elapsed)")
 
-    if mode == "b":
+    if mode == MODE_POLLINATED:
         log("  Removing /var/cache/pollinate/seeded so pollinate runs on next boot...")
         run_with_retries(
             lambda: lxc_guest_cmd(vm_name, "sudo -n rm -f /var/cache/pollinate/seeded", timeout=60, check=True),
@@ -382,7 +388,7 @@ def collect_one_attempt(
 
     cpu_nsec = None
     cpu_raw = ""
-    if mode == "b":
+    if mode == MODE_POLLINATED:
         log("  Collecting pollinate.service CPUUsageNSec...")
         cpu = run_with_retries(
             lambda: lxc_guest_cmd(
@@ -495,13 +501,16 @@ def main():
     else:
         log("Skipping prep stage (--skip-prep passed).")
 
-    success = {"a": 0, "b": 0}
+    success = {MODE_NO_POLLINATE: 0, MODE_POLLINATED: 0}
     attempt_no = 1
 
-    log(f"=== Starting measurement campaign: target {args.iterations} successful runs per mode ===")
+    log(
+        "=== Starting measurement campaign: target "
+        f"{args.iterations} successful runs per mode ({MODE_NO_POLLINATE}, {MODE_POLLINATED}) ==="
+    )
 
-    while success["a"] < args.iterations or success["b"] < args.iterations:
-        mode = "a" if (attempt_no % 2 == 1) else "b"
+    while success[MODE_NO_POLLINATE] < args.iterations or success[MODE_POLLINATED] < args.iterations:
+        mode = MODE_NO_POLLINATE if (attempt_no % 2 == 1) else MODE_POLLINATED
 
         if success[mode] >= args.iterations:
             append_jsonl(
@@ -532,7 +541,8 @@ def main():
             append_jsonl(attempts_log, metadata)
             log(
                 f"Attempt {attempt_no} mode={mode} SUCCESS  "
-                f"[A: {success['a']}/{args.iterations}  B: {success['b']}/{args.iterations}]"
+                f"[{MODE_NO_POLLINATE}: {success[MODE_NO_POLLINATE]}/{args.iterations}  "
+                f"{MODE_POLLINATED}: {success[MODE_POLLINATED]}/{args.iterations}]"
             )
         except Exception as exc:
             payload = {
@@ -545,12 +555,17 @@ def main():
             append_jsonl(attempts_log, payload)
             log(
                 f"Attempt {attempt_no} mode={mode} FAILED: {exc}  "
-                f"[A: {success['a']}/{args.iterations}  B: {success['b']}/{args.iterations}]",
+                f"[{MODE_NO_POLLINATE}: {success[MODE_NO_POLLINATE]}/{args.iterations}  "
+                f"{MODE_POLLINATED}: {success[MODE_POLLINATED]}/{args.iterations}]",
                 "WARN",
             )
         attempt_no += 1
 
-    log(f"=== Campaign complete: {success['a']} mode-A and {success['b']} mode-B successful runs ===")
+    log(
+        "=== Campaign complete: "
+        f"{success[MODE_NO_POLLINATE]} {MODE_NO_POLLINATE} and "
+        f"{success[MODE_POLLINATED]} {MODE_POLLINATED} successful runs ==="
+    )
 
     summary = {
         "run_id": run_id,
