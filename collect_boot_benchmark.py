@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import atexit
 import json
 import re
 import shutil
@@ -12,17 +13,18 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 PREP_SCRIPT = """#!/bin/bash
+set -euo pipefail
 echo "==> Configuring APT and MOTD defaults..."
-sudo mkdir -p /etc/apt/apt.conf.d/
-cat << 'EOF2' | sudo tee /etc/apt/apt.conf.d/99disable-periodic > /dev/null
+sudo -n mkdir -p /etc/apt/apt.conf.d/
+cat << 'EOF2' | sudo -n tee /etc/apt/apt.conf.d/99disable-periodic > /dev/null
 APT::Periodic::Enable "0";
 APT::Periodic::Update-Package-Lists "0";
 APT::Periodic::Download-Upgradeable-Packages "0";
 APT::Periodic::AutocleanInterval "0";
 APT::Periodic::Unattended-Upgrade "0";
 EOF2
-[ -f /etc/default/motd-news ] && sudo sed -i 's/ENABLED=1/ENABLED=0/g' /etc/default/motd-news
-[ -f /etc/default/apport ] && sudo sed -i 's/enabled=1/enabled=0/g' /etc/default/apport
+[ -f /etc/default/motd-news ] && sudo -n sed -i 's/ENABLED=1/ENABLED=0/g' /etc/default/motd-news
+[ -f /etc/default/apport ] && sudo -n sed -i 's/enabled=1/enabled=0/g' /etc/default/apport
 
 echo "==> Masking background services and timers..."
 TARGETS=(
@@ -32,13 +34,13 @@ TARGETS=(
     apport.service ubuntu-advantage.service
 )
 for item in "${TARGETS[@]}"; do
-    sudo systemctl stop "$item" 2>/dev/null
-    sudo systemctl mask "$item" 2>/dev/null
+    sudo -n systemctl stop "$item" 2>/dev/null || true
+    sudo -n systemctl mask "$item" 2>/dev/null || true
 done
 
 echo "==> Halting time synchronization and potential boot warp..."
-sudo timedatectl set-ntp false
-sudo systemctl stop systemd-timesyncd chrony 2>/dev/null
+sudo -n timedatectl set-ntp false
+sudo -n systemctl stop systemd-timesyncd chrony 2>/dev/null || true
 
 echo "==> Base environment minimized. Ready for benchmark."
 """
@@ -55,6 +57,46 @@ class CmdResult:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def log(msg: str, level: str = "INFO") -> None:
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts} {level}] {msg}", flush=True)
+
+
+def run_cmd_streaming(
+    cmd: list,
+    *,
+    input_text: Optional[str] = None,
+    timeout: Optional[int] = None,
+    check: bool = False,
+) -> int:
+    """Run a command with stdout/stderr streamed live to the terminal.
+
+    Returns the process exit code. No captured output; use run_cmd() when
+    the output needs to be parsed.
+    """
+    cmd_str = " ".join(str(c) for c in cmd)
+    log(f"  $ {cmd_str}")
+    t0 = time.monotonic()
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        text=True,
+    )
+    try:
+        proc.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise RuntimeError(f"Command timed out after {timeout}s: {cmd_str}")
+    elapsed = time.monotonic() - t0
+    log(f"  -> rc={proc.returncode} ({elapsed:.1f}s)")
+    if check and proc.returncode != 0:
+        raise RuntimeError(f"Command failed (rc={proc.returncode}): {cmd_str}")
+    return proc.returncode
 
 
 def run_cmd(cmd, *, input_text: Optional[str] = None, timeout: Optional[int] = None, check: bool = False) -> CmdResult:
@@ -79,6 +121,11 @@ def run_with_retries(fn, retries: int, delay_seconds: int, description: str):
         except Exception as exc:
             last_err = exc
             if idx < retries:
+                log(
+                    f"  retry {idx}/{retries - 1} for '{description}': {exc}; "
+                    f"waiting {delay_seconds}s before next attempt",
+                    "WARN",
+                )
                 time.sleep(delay_seconds)
     raise RuntimeError(f"{description} failed after {retries} retries: {last_err}")
 
@@ -100,8 +147,12 @@ def provision_vm(vm_name: str, force_recreate: bool):
             raise RuntimeError(
                 f"VM '{vm_name}' already exists. Refusing to continue. Pass --force-recreate to replace it."
             )
+        log(f"Deleting existing VM '{vm_name}'...")
         run_cmd(["lxc", "delete", "-f", vm_name], check=True)
+        log(f"VM '{vm_name}' deleted")
 
+    log(f"Launching VM '{vm_name}' (ubuntu:26.04, limits.cpu=4, limits.memory=8GiB)...")
+    t0 = time.monotonic()
     run_cmd(
         [
             "lxc",
@@ -116,14 +167,23 @@ def provision_vm(vm_name: str, force_recreate: bool):
         ],
         check=True,
     )
+    log(f"VM '{vm_name}' launched ({time.monotonic() - t0:.0f}s)")
 
 
 def wait_for_guest(vm_name: str, timeout_seconds: int):
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
+    log(f"Waiting for guest '{vm_name}' to become ready (timeout={timeout_seconds}s)...")
+    t0 = time.monotonic()
+    last_report = t0
+    deadline = t0 + timeout_seconds
+    while time.monotonic() < deadline:
         probe = run_cmd(["lxc", "exec", vm_name, "--", "true"], check=False)
         if probe.rc == 0:
+            log(f"Guest '{vm_name}' is ready ({time.monotonic() - t0:.0f}s elapsed)")
             return
+        now = time.monotonic()
+        if now - last_report >= 30:
+            log(f"  still waiting for '{vm_name}' ({now - t0:.0f}s elapsed)...")
+            last_report = now
         time.sleep(5)
     raise RuntimeError(f"Guest {vm_name} did not become ready within {timeout_seconds} seconds")
 
@@ -136,21 +196,25 @@ def write_text(path: Path, content: str):
 def run_prep_stage(vm_name: str, setup_dir: Path):
     setup_dir.mkdir(parents=True, exist_ok=True)
 
-    host = run_cmd(["bash", "-s"], input_text=PREP_SCRIPT, timeout=1800, check=False)
-    write_text(setup_dir / "host-prep.stdout.log", host.out)
-    write_text(setup_dir / "host-prep.stderr.log", host.err)
-    if host.rc != 0:
-        raise RuntimeError("Host preparation script failed")
+    log("=== HOST PREP: running environment minimization script on host ===")
+    log("NOTE: script runs with sudo -n; requires passwordless sudo (checked at startup)")
+    rc = run_cmd_streaming(["bash", "-s"], input_text=PREP_SCRIPT, timeout=300)
+    if rc != 0:
+        raise RuntimeError(f"Host preparation script failed (rc={rc})")
+    log("=== HOST PREP COMPLETE ===")
 
-    guest = run_cmd(["lxc", "exec", vm_name, "--", "bash", "-s"], input_text=PREP_SCRIPT, timeout=1800, check=False)
-    write_text(setup_dir / "guest-prep.stdout.log", guest.out)
-    write_text(setup_dir / "guest-prep.stderr.log", guest.err)
-    if guest.rc != 0:
-        raise RuntimeError("Guest preparation script failed")
+    log(f"=== GUEST PREP: running environment minimization script on '{vm_name}' ===")
+    rc = run_cmd_streaming(
+        ["lxc", "exec", vm_name, "--", "bash", "-s"],
+        input_text=PREP_SCRIPT,
+        timeout=300,
+    )
+    if rc != 0:
+        raise RuntimeError(f"Guest preparation script failed (rc={rc})")
+    log("=== GUEST PREP COMPLETE ===")
 
-    reboot_cmd = run_cmd(["lxc", "exec", vm_name, "--", "bash", "-lc", "sudo reboot"], check=False)
-    write_text(setup_dir / "post-setup-reboot.stdout.log", reboot_cmd.out)
-    write_text(setup_dir / "post-setup-reboot.stderr.log", reboot_cmd.err)
+    log(f"Rebooting guest '{vm_name}' after prep (reboot command may return non-zero as the connection drops)...")
+    run_cmd_streaming(["lxc", "exec", vm_name, "--", "bash", "-lc", "sudo -n reboot"], timeout=30)
 
 
 def parse_duration_to_seconds(token: str) -> float:
@@ -208,26 +272,33 @@ def collect_one_attempt(
     wait_timeout: int,
     attempt_timeout: int,
 ) -> Dict:
+    mode_label = "A (pollinate skipped – seeded file intact)" if mode == "a" else "B (pollinate active – seeded file removed)"
+    log(f"--- Attempt {attempt_no} mode={mode} ({mode_label}) ---")
     started = time.time()
     mode_dir = out_dir / ("mode_a" if mode == "a" else "mode_b") / f"attempt_{attempt_no:04d}"
     mode_dir.mkdir(parents=True, exist_ok=True)
+    log(f"  Artifacts: {mode_dir}")
 
     def check_attempt_budget():
-        if (time.time() - started) > attempt_timeout:
-            raise RuntimeError(f"Attempt {attempt_no} exceeded timeout of {attempt_timeout} seconds")
+        elapsed = time.time() - started
+        if elapsed > attempt_timeout:
+            raise RuntimeError(f"Attempt {attempt_no} exceeded timeout of {attempt_timeout}s ({elapsed:.0f}s elapsed)")
 
     if mode == "b":
+        log("  Removing /var/cache/pollinate/seeded so pollinate runs on next boot...")
         run_with_retries(
-            lambda: lxc_guest_cmd(vm_name, "sudo rm -f /var/cache/pollinate/seeded", timeout=60, check=True),
+            lambda: lxc_guest_cmd(vm_name, "sudo -n rm -f /var/cache/pollinate/seeded", timeout=60, check=True),
             retries,
             retry_delay,
             "remove pollinate seeded marker",
         )
         check_attempt_budget()
 
-    reboot = run_cmd(["lxc", "exec", vm_name, "--", "bash", "-lc", "sudo reboot"], check=False, timeout=30)
+    log(f"  Sending reboot to guest '{vm_name}'...")
+    reboot = run_cmd(["lxc", "exec", vm_name, "--", "bash", "-lc", "sudo -n reboot"], check=False, timeout=30)
     write_text(mode_dir / "reboot.stdout.log", reboot.out)
     write_text(mode_dir / "reboot.stderr.log", reboot.err)
+    log(f"  Reboot command returned rc={reboot.rc} (non-zero is normal as the connection drops during shutdown)")
 
     run_with_retries(
         lambda: wait_for_guest(vm_name, wait_timeout),
@@ -237,6 +308,7 @@ def collect_one_attempt(
     )
     check_attempt_budget()
 
+    log("  Collecting systemd-analyze time...")
     analyze_time = run_with_retries(
         lambda: lxc_guest_cmd(vm_name, "systemd-analyze time", timeout=120, check=True),
         retries,
@@ -244,7 +316,9 @@ def collect_one_attempt(
         "systemd-analyze time",
     )
     write_text(mode_dir / "systemd-analyze-time.txt", analyze_time.out)
+    log(f"  systemd-analyze time: {analyze_time.out.strip()}")
 
+    log("  Collecting systemd-analyze blame...")
     analyze_blame = run_with_retries(
         lambda: lxc_guest_cmd(vm_name, "systemd-analyze blame", timeout=180, check=True),
         retries,
@@ -252,10 +326,12 @@ def collect_one_attempt(
         "systemd-analyze blame",
     )
     write_text(mode_dir / "systemd-analyze-blame.txt", analyze_blame.out)
+    log(f"  systemd-analyze blame: {len(analyze_blame.out.splitlines())} lines saved")
 
     cpu_nsec = None
     cpu_raw = ""
     if mode == "b":
+        log("  Collecting pollinate.service CPUUsageNSec...")
         cpu = run_with_retries(
             lambda: lxc_guest_cmd(
                 vm_name,
@@ -270,9 +346,12 @@ def collect_one_attempt(
         cpu_raw = cpu.out
         write_text(mode_dir / "pollinate-cpu.txt", cpu_raw)
         cpu_nsec = parse_cpu_nsec(cpu_raw)
+        log(f"  pollinate CPUUsageNSec={cpu_nsec}")
 
+    log("  Parsing systemd-analyze time output...")
     total_s, kernel_s, userspace_s = parse_systemd_analyze_time(analyze_time.out)
     check_attempt_budget()
+    log(f"  Parsed: total={total_s}s  kernel={kernel_s}s  userspace={userspace_s}s")
 
     metadata = {
         "attempt_no": attempt_no,
@@ -308,25 +387,59 @@ def main():
     parser.add_argument("--attempt-timeout", type=int, default=420)
     args = parser.parse_args()
 
-    if shutil.which("lxc") is None:
-        raise RuntimeError("Required command 'lxc' not found in PATH")
+    # Restore terminal on exit in case a subprocess (e.g. sudo) left it in raw mode.
+    atexit.register(lambda: subprocess.run(["stty", "sane"], check=False, stderr=subprocess.DEVNULL))
 
     run_id = datetime.now(timezone.utc).strftime("run-%Y%m%dT%H%M%SZ")
     out_dir = Path(args.output_root) / run_id
     setup_dir = out_dir / "setup"
     attempts_log = out_dir / "attempts.jsonl"
 
-    run_cmd(["lxc", "version"], check=True)
+    log("=== Pollinate boot benchmark ===")
+    log(f"run_id        : {run_id}")
+    log(f"output_dir    : {out_dir}")
+    log(f"vm_name       : {args.vm_name}")
+    log(f"iterations    : {args.iterations} per mode")
+    log(f"skip_prep     : {args.skip_prep}")
+    log(f"wait_timeout  : {args.wait_timeout}s  retries={args.retries}  retry_delay={args.retry_delay}s")
+    log(f"attempt_timeout: {args.attempt_timeout}s")
+
+    # Preflight: verify lxc is available.
+    if shutil.which("lxc") is None:
+        log("Required command 'lxc' not found in PATH", "ERROR")
+        sys.exit(1)
+    lxc_ver = run_cmd(["lxc", "version"], check=True)
+    log(f"lxc version: {lxc_ver.out.strip()}")
+
+    # Preflight: verify passwordless sudo on host (required by PREP_SCRIPT).
+    if not args.skip_prep:
+        log("Checking host passwordless sudo (required for prep stage)...")
+        sudo_check = run_cmd(["sudo", "-n", "true"], check=False)
+        if sudo_check.rc != 0:
+            log(
+                "Host sudo requires a password (sudo -n true returned non-zero).\n"
+                "  -> Configure passwordless sudo for this user, or pass --skip-prep to skip host prep.",
+                "ERROR",
+            )
+            sys.exit(1)
+        log("Passwordless sudo on host: OK")
 
     provision_vm(args.vm_name, args.force_recreate)
     wait_for_guest(args.vm_name, args.wait_timeout)
 
     if not args.skip_prep:
+        log("Starting one-time environment preparation stage...")
         run_prep_stage(args.vm_name, setup_dir)
+        log("Prep stage complete; waiting for guest to return after post-prep reboot...")
         wait_for_guest(args.vm_name, args.wait_timeout)
+        log("Guest ready. Starting measurement campaign.")
+    else:
+        log("Skipping prep stage (--skip-prep passed).")
 
     success = {"a": 0, "b": 0}
     attempt_no = 1
+
+    log(f"=== Starting measurement campaign: target {args.iterations} successful runs per mode ===")
 
     while success["a"] < args.iterations or success["b"] < args.iterations:
         mode = "a" if (attempt_no % 2 == 1) else "b"
@@ -357,9 +470,9 @@ def main():
             )
             success[mode] += 1
             append_jsonl(attempts_log, metadata)
-            print(
-                f"attempt={attempt_no} mode={mode} status=success counts(a={success['a']}, b={success['b']})",
-                flush=True,
+            log(
+                f"Attempt {attempt_no} mode={mode} SUCCESS  "
+                f"[A: {success['a']}/{args.iterations}  B: {success['b']}/{args.iterations}]"
             )
         except Exception as exc:
             payload = {
@@ -370,12 +483,14 @@ def main():
                 "timestamp": now_iso(),
             }
             append_jsonl(attempts_log, payload)
-            print(
-                f"attempt={attempt_no} mode={mode} status=failed error={exc} counts(a={success['a']}, b={success['b']})",
-                file=sys.stderr,
-                flush=True,
+            log(
+                f"Attempt {attempt_no} mode={mode} FAILED: {exc}  "
+                f"[A: {success['a']}/{args.iterations}  B: {success['b']}/{args.iterations}]",
+                "WARN",
             )
         attempt_no += 1
+
+    log(f"=== Campaign complete: {success['a']} mode-A and {success['b']} mode-B successful runs ===")
 
     summary = {
         "run_id": run_id,
@@ -386,6 +501,7 @@ def main():
         "finished_at": now_iso(),
     }
     write_text(out_dir / "run-summary.json", json.dumps(summary, indent=2, sort_keys=True))
+    log(f"Run summary written to {out_dir / 'run-summary.json'}")
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 
