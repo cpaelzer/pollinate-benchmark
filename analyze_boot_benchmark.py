@@ -180,8 +180,10 @@ def main():
     print("Boot statistics after IQR filtering (guardrails applied)")
     print_metric_block("Total boot time", total_no_pollinate, total_pollinated, fmt_seconds)
     print_metric_block("Kernel boot time", kernel_no_pollinate, kernel_pollinated, fmt_seconds)
+    print()
     print_metric_block("Userspace boot time", user_no_pollinate, user_pollinated, fmt_seconds)
 
+    print()
     print(f"Pollinate CPU usage ({MODE_POLLINATED} only)")
     print(
         f"  {MODE_POLLINATED} raw_count={pollinate_cpu_pollinated['raw']['count']} "
