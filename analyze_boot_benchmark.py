@@ -81,13 +81,11 @@ def summarize(values: List[float]) -> Dict:
         return {
             "count": 0,
             "mean": None,
-            "median": None,
             "stddev": None,
         }
     return {
         "count": len(values),
         "mean": statistics.mean(values),
-        "median": statistics.median(values),
         "stddev": statistics.stdev(values) if len(values) > 1 else 0.0,
     }
 
@@ -123,10 +121,6 @@ def print_metric_block(title: str, a_stats: Dict, b_stats: Dict, formatter):
         f"{formatter(a_stats['filtered']['mean']) if a_stats['filtered']['mean'] is not None else 'n/a'}"
     )
     print(
-        f"    {MODE_NO_POLLINATE} median="
-        f"{formatter(a_stats['filtered']['median']) if a_stats['filtered']['median'] is not None else 'n/a'}"
-    )
-    print(
         f"    {MODE_NO_POLLINATE} stddev="
         f"{formatter(a_stats['filtered']['stddev']) if a_stats['filtered']['stddev'] is not None else 'n/a'}"
     )
@@ -137,10 +131,6 @@ def print_metric_block(title: str, a_stats: Dict, b_stats: Dict, formatter):
     print(
         f"    {MODE_POLLINATED} mean="
         f"{formatter(b_stats['filtered']['mean']) if b_stats['filtered']['mean'] is not None else 'n/a'}"
-    )
-    print(
-        f"    {MODE_POLLINATED} median="
-        f"{formatter(b_stats['filtered']['median']) if b_stats['filtered']['median'] is not None else 'n/a'}"
     )
     print(
         f"    {MODE_POLLINATED} stddev="
@@ -201,10 +191,6 @@ def main():
     print(
         f"    {MODE_POLLINATED} mean="
         f"{fmt_nsec(pollinate_cpu_pollinated['filtered']['mean']) if pollinate_cpu_pollinated['filtered']['mean'] is not None else 'n/a'}"
-    )
-    print(
-        f"    {MODE_POLLINATED} median="
-        f"{fmt_nsec(pollinate_cpu_pollinated['filtered']['median']) if pollinate_cpu_pollinated['filtered']['median'] is not None else 'n/a'}"
     )
     print(
         f"    {MODE_POLLINATED} stddev="
