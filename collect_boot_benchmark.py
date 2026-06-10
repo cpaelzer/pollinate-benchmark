@@ -153,23 +153,64 @@ def provision_vm(vm_name: str, force_recreate: bool):
         run_cmd(["lxc", "delete", "-f", vm_name], check=True)
         log(f"VM '{vm_name}' deleted")
 
-    log(f"Launching VM '{vm_name}' (ubuntu:26.04, limits.cpu=4, limits.memory=8GiB)...")
-    t0 = time.monotonic()
-    run_cmd(
-        [
-            "lxc",
-            "launch",
-            "ubuntu:26.04",
-            vm_name,
-            "--vm",
-            "-c",
-            "limits.cpu=4",
-            "-c",
-            "limits.memory=8GiB",
-        ],
-        check=True,
-    )
-    log(f"VM '{vm_name}' launched ({time.monotonic() - t0:.0f}s)")
+    launch_cmd = [
+        "lxc",
+        "launch",
+        "ubuntu:26.04",
+        vm_name,
+        "--vm",
+        "-c",
+        "limits.cpu=4",
+        "-c",
+        "limits.memory=8GiB",
+    ]
+    last_launch_stdout = ""
+    last_launch_stderr = ""
+    last_reason = ""
+    for attempt in range(1, 4):
+        log(
+            f"Launching VM '{vm_name}' (ubuntu:26.04, limits.cpu=4, limits.memory=8GiB)... "
+            f"attempt {attempt}/3 (timeout=600s)"
+        )
+        t0 = time.monotonic()
+        launch_stdout = ""
+        launch_stderr = ""
+        reason = ""
+        try:
+            result = run_cmd(launch_cmd, timeout=600, check=False)
+            launch_stdout = result.out
+            launch_stderr = result.err
+            if result.rc == 0:
+                log(f"VM '{vm_name}' launched ({time.monotonic() - t0:.0f}s)")
+                return
+            reason = f"lxc launch exited with rc={result.rc}"
+        except subprocess.TimeoutExpired as exc:
+            launch_stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+            launch_stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            reason = "lxc launch timed out after 600s"
+
+        last_reason = reason
+        last_launch_stdout = launch_stdout
+        last_launch_stderr = launch_stderr
+
+        log(f"Provision attempt {attempt} failed: {reason}", "ERROR")
+        if launch_stdout:
+            log("Captured launch stdout:", "ERROR")
+            print(launch_stdout, flush=True)
+        if launch_stderr:
+            log("Captured launch stderr:", "ERROR")
+            print(launch_stderr, flush=True)
+
+        if attempt < 3:
+            log(f"Cleaning up potentially partial instance '{vm_name}' before retry...", "WARN")
+            run_cmd(["lxc", "delete", "-f", vm_name], timeout=180, check=False)
+
+    details = [f"VM provisioning failed after 3 attempts. Last error: {last_reason}"]
+    if last_launch_stdout:
+        details.append(f"Last launch stdout:\n{last_launch_stdout}")
+    if last_launch_stderr:
+        details.append(f"Last launch stderr:\n{last_launch_stderr}")
+    raise RuntimeError("\n".join(details))
 
 
 def wait_for_guest(vm_name: str, timeout_seconds: int):
