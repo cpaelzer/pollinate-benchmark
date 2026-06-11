@@ -236,7 +236,14 @@ def write_text(path: Path, content: str):
     path.write_text(content, encoding="utf-8")
 
 
-def run_prep_stage(vm_name: str, setup_dir: Path):
+def run_prep_stage(
+    vm_name: str,
+    setup_dir: Path,
+    retries: int,
+    retry_delay: int,
+    wait_timeout: int,
+    post_reboot_delay: int,
+):
     setup_dir.mkdir(parents=True, exist_ok=True)
 
     log("=== HOST PREP: running environment minimization script on host ===")
@@ -257,7 +264,16 @@ def run_prep_stage(vm_name: str, setup_dir: Path):
     log("=== GUEST PREP COMPLETE ===")
 
     log(f"Rebooting guest '{vm_name}' after prep (reboot command may return non-zero as the connection drops)...")
-    run_cmd_streaming(["lxc", "exec", vm_name, "--", "bash", "-lc", "sudo -n reboot"], timeout=30)
+    reboot_guest_and_wait(
+        vm_name,
+        retries=retries,
+        retry_delay=retry_delay,
+        wait_timeout=wait_timeout,
+        post_reboot_delay=post_reboot_delay,
+        phase_label="post-prep reboot",
+        artifacts_dir=setup_dir,
+        reboot_log_prefix="post-prep-reboot",
+    )
 
 
 def parse_duration_to_seconds(token: str) -> float:
@@ -341,6 +357,50 @@ def wait_for_new_boot_id(vm_name: str, old_boot_id: str, timeout_seconds: int, r
     )
 
 
+def reboot_guest_and_wait(
+    vm_name: str,
+    *,
+    retries: int,
+    retry_delay: int,
+    wait_timeout: int,
+    post_reboot_delay: int,
+    phase_label: str,
+    artifacts_dir: Optional[Path] = None,
+    reboot_log_prefix: str = "reboot",
+) -> str:
+    old_boot_id = run_with_retries(
+        lambda: get_boot_id(vm_name),
+        retries,
+        retry_delay,
+        f"read pre-reboot boot_id ({phase_label})",
+    )
+    log(f"  Current boot_id before reboot ({phase_label}): {old_boot_id}")
+
+    log(f"  Sending reboot to guest '{vm_name}' ({phase_label})...")
+    reboot = run_cmd(["lxc", "exec", vm_name, "--", "bash", "-lc", "sudo -n reboot"], check=False, timeout=30)
+    if artifacts_dir is not None:
+        write_text(artifacts_dir / f"{reboot_log_prefix}.stdout.log", reboot.out)
+        write_text(artifacts_dir / f"{reboot_log_prefix}.stderr.log", reboot.err)
+    log(
+        f"  Reboot command returned rc={reboot.rc} "
+        f"(non-zero is normal as the connection drops during shutdown)"
+    )
+
+    log(f"  Sleeping {post_reboot_delay}s to let shutdown/reboot transition begin...")
+    time.sleep(post_reboot_delay)
+
+    run_with_retries(
+        lambda: wait_for_guest(vm_name, wait_timeout),
+        retries,
+        retry_delay,
+        f"wait for guest readiness ({phase_label})",
+    )
+
+    new_boot_id = wait_for_new_boot_id(vm_name, old_boot_id, wait_timeout, retry_delay)
+    log(f"  Reboot validated with new boot_id ({phase_label}): {new_boot_id}")
+    return new_boot_id
+
+
 def collect_one_attempt(
     vm_name: str,
     mode: str,
@@ -393,33 +453,15 @@ def collect_one_attempt(
     )
     check_attempt_budget()
 
-    old_boot_id = run_with_retries(
-        lambda: get_boot_id(vm_name),
-        retries,
-        retry_delay,
-        "read pre-reboot boot_id",
+    reboot_guest_and_wait(
+        vm_name,
+        retries=retries,
+        retry_delay=retry_delay,
+        wait_timeout=wait_timeout,
+        post_reboot_delay=post_reboot_delay,
+        phase_label=f"attempt {attempt_no}",
+        artifacts_dir=mode_dir,
     )
-    log(f"  Current boot_id before reboot: {old_boot_id}")
-
-    log(f"  Sending reboot to guest '{vm_name}'...")
-    reboot = run_cmd(["lxc", "exec", vm_name, "--", "bash", "-lc", "sudo -n reboot"], check=False, timeout=30)
-    write_text(mode_dir / "reboot.stdout.log", reboot.out)
-    write_text(mode_dir / "reboot.stderr.log", reboot.err)
-    log(f"  Reboot command returned rc={reboot.rc} (non-zero is normal as the connection drops during shutdown)")
-
-    log(f"  Sleeping {post_reboot_delay}s to let shutdown/reboot transition begin...")
-    time.sleep(post_reboot_delay)
-    check_attempt_budget()
-
-    run_with_retries(
-        lambda: wait_for_guest(vm_name, wait_timeout),
-        retries,
-        retry_delay,
-        "wait for guest readiness",
-    )
-
-    new_boot_id = wait_for_new_boot_id(vm_name, old_boot_id, wait_timeout, retry_delay)
-    log(f"  Reboot validated with new boot_id: {new_boot_id}")
     check_attempt_budget()
 
     log("  Collecting systemd-analyze time...")
@@ -550,10 +592,15 @@ def main():
 
     if not args.skip_prep:
         log("Starting one-time environment preparation stage...")
-        run_prep_stage(args.vm_name, setup_dir)
-        log("Prep stage complete; waiting for guest to return after post-prep reboot...")
-        wait_for_guest(args.vm_name, args.wait_timeout)
-        log("Guest ready. Starting measurement campaign.")
+        run_prep_stage(
+            args.vm_name,
+            setup_dir,
+            args.retries,
+            args.retry_delay,
+            args.wait_timeout,
+            args.post_reboot_delay,
+        )
+        log("Prep stage complete; reboot validated. Starting measurement campaign.")
     else:
         log("Skipping prep stage (--skip-prep passed).")
 
