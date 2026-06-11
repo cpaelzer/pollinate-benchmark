@@ -104,6 +104,7 @@ def run_cmd_streaming(
 def run_cmd(cmd, *, input_text: Optional[str] = None, timeout: Optional[int] = None, check: bool = False) -> CmdResult:
     p = subprocess.run(
         cmd,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
         input=input_text,
         text=True,
         capture_output=True,
@@ -178,6 +179,19 @@ def collect_lxd_daemon_logs(start_ts: str, end_ts: str) -> str:
             f"(rc={result.rc})\nSTDOUT:\n{out or '<empty>'}\nSTDERR:\n{err or '<empty>'}"
         )
     return out or "<no log lines in selected window>"
+
+
+def get_image_fingerprint(image_ref: str, timeout_seconds: int) -> str:
+    result = run_cmd(
+        ["lxc", "image", "info", image_ref, "--format=json"],
+        timeout=timeout_seconds,
+        check=True,
+    )
+    payload = json.loads(result.out)
+    fingerprint = str(payload.get("fingerprint", "")).strip()
+    if not fingerprint:
+        raise RuntimeError(f"Could not determine fingerprint for image reference '{image_ref}'")
+    return fingerprint
 
 
 def run_lxd_step_with_retries(
@@ -273,12 +287,16 @@ def provision_vm(vm_name: str, force_recreate: bool, provision_timeout: int):
         timeout_seconds=provision_timeout,
     )
 
+    fingerprint = get_image_fingerprint("ubuntu:26.04", provision_timeout)
+    local_image_ref = f"local:{fingerprint}"
+    log(f"Using prefetched local image fingerprint for launch: {local_image_ref}")
+
     launch_cmd = [
         "lxc",
         "--debug",
         "--verbose",
         "launch",
-        "ubuntu:26.04",
+        local_image_ref,
         vm_name,
         "--vm",
         "-c",
@@ -288,7 +306,7 @@ def provision_vm(vm_name: str, force_recreate: bool, provision_timeout: int):
     ]
     run_lxd_step_with_retries(
         step_name=(
-            f"Launching VM '{vm_name}' (ubuntu:26.04, limits.cpu=2, limits.memory=2GiB)"
+            f"Launching VM '{vm_name}' ({local_image_ref}, limits.cpu=2, limits.memory=2GiB)"
         ),
         cmd=launch_cmd,
         retries=3,
