@@ -401,6 +401,40 @@ def reboot_guest_and_wait(
     return new_boot_id
 
 
+def wait_for_boot_completion(vm_name: str, timeout_seconds: int, poll_delay: int) -> None:
+    """Wait until systemd reports boot completion.
+
+    This prevents noisy retries for commands like `systemd-analyze time` on
+    slow systems where ssh/lxd-agent is already available but boot is not
+    fully finished yet.
+    """
+    log(f"  Waiting for full system boot completion (timeout={timeout_seconds}s)...")
+    t0 = time.monotonic()
+    deadline = t0 + timeout_seconds
+    last_report = t0
+
+    while time.monotonic() < deadline:
+        probe = lxc_guest_cmd(
+            vm_name,
+            "systemctl show -p FinishTimestampMonotonic --value",
+            timeout=30,
+            check=False,
+        )
+        if probe.rc == 0:
+            raw_value = probe.out.strip()
+            if raw_value.isdigit() and int(raw_value) > 0:
+                log(f"  System boot completion confirmed ({time.monotonic() - t0:.0f}s elapsed)")
+                return
+
+        now = time.monotonic()
+        if now - last_report >= 30:
+            log(f"  still waiting for full boot completion ({now - t0:.0f}s elapsed)...")
+            last_report = now
+        time.sleep(poll_delay)
+
+    raise RuntimeError(f"System boot did not fully complete within {timeout_seconds} seconds")
+
+
 def collect_one_attempt(
     vm_name: str,
     mode: str,
@@ -411,6 +445,8 @@ def collect_one_attempt(
     wait_timeout: int,
     attempt_timeout: int,
     post_reboot_delay: int,
+    boot_complete_timeout: int,
+    boot_complete_poll_delay: int,
 ) -> Dict:
     mode_label = (
         "pollinate skipped (seeded file intact)"
@@ -462,6 +498,9 @@ def collect_one_attempt(
         phase_label=f"attempt {attempt_no}",
         artifacts_dir=mode_dir,
     )
+    check_attempt_budget()
+
+    wait_for_boot_completion(vm_name, boot_complete_timeout, boot_complete_poll_delay)
     check_attempt_budget()
 
     log("  Collecting systemd-analyze time...")
@@ -547,6 +586,18 @@ def main():
         default=20,
         help="Seconds to wait after issuing reboot before reconnect checks (default: 20)",
     )
+    parser.add_argument(
+        "--boot-complete-timeout",
+        type=int,
+        default=180,
+        help="Seconds to wait for full system boot completion after reboot validation (default: 180)",
+    )
+    parser.add_argument(
+        "--boot-complete-poll-delay",
+        type=int,
+        default=5,
+        help="Seconds between full-boot completion checks (default: 5)",
+    )
     args = parser.parse_args()
 
     # Restore terminal on exit in case a subprocess (e.g. sudo) left it in raw mode.
@@ -566,6 +617,10 @@ def main():
     log(f"wait_timeout  : {args.wait_timeout}s  retries={args.retries}  retry_delay={args.retry_delay}s")
     log(f"attempt_timeout: {args.attempt_timeout}s")
     log(f"post_reboot_delay: {args.post_reboot_delay}s")
+    log(
+        f"boot_complete_timeout: {args.boot_complete_timeout}s  "
+        f"boot_complete_poll_delay={args.boot_complete_poll_delay}s"
+    )
 
     # Preflight: verify lxc is available.
     if shutil.which("lxc") is None:
@@ -639,6 +694,8 @@ def main():
                 wait_timeout=args.wait_timeout,
                 attempt_timeout=args.attempt_timeout,
                 post_reboot_delay=args.post_reboot_delay,
+                boot_complete_timeout=args.boot_complete_timeout,
+                boot_complete_poll_delay=args.boot_complete_poll_delay,
             )
             success[mode] += 1
             append_jsonl(attempts_log, metadata)
