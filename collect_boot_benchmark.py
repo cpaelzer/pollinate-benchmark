@@ -153,7 +153,109 @@ def vm_exists(vm_name: str) -> bool:
     return run_cmd(["lxc", "info", vm_name], check=False).rc == 0
 
 
-def provision_vm(vm_name: str, force_recreate: bool):
+def collect_lxd_daemon_logs(start_ts: str, end_ts: str) -> str:
+    result = run_cmd(
+        [
+            "sudo",
+            "-n",
+            "journalctl",
+            "-u",
+            "snap.lxd.daemon",
+            "--since",
+            start_ts,
+            "--until",
+            end_ts,
+            "--no-pager",
+        ],
+        timeout=120,
+        check=False,
+    )
+    out = result.out.strip()
+    err = result.err.strip()
+    if result.rc != 0:
+        return (
+            "Failed to collect LXD daemon logs "
+            f"(rc={result.rc})\nSTDOUT:\n{out or '<empty>'}\nSTDERR:\n{err or '<empty>'}"
+        )
+    return out or "<no log lines in selected window>"
+
+
+def run_lxd_step_with_retries(
+    *,
+    step_name: str,
+    cmd: list,
+    retries: int,
+    timeout_seconds: int,
+    first_attempt_timeout_multiplier: int = 1,
+    cleanup_cmd: Optional[list] = None,
+) -> None:
+    last_stdout = ""
+    last_stderr = ""
+    last_reason = ""
+    last_daemon_logs = ""
+
+    for attempt in range(1, retries + 1):
+        attempt_timeout = timeout_seconds * first_attempt_timeout_multiplier if attempt == 1 else timeout_seconds
+        log(f"{step_name}... attempt {attempt}/{retries} (timeout={attempt_timeout}s)")
+
+        launch_stdout = ""
+        launch_stderr = ""
+        reason = ""
+        started_at = datetime.now(timezone.utc)
+        started_str = started_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        try:
+            result = run_cmd(cmd, timeout=attempt_timeout, check=False)
+            launch_stdout = result.out
+            launch_stderr = result.err
+            if result.rc == 0:
+                elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+                log(f"{step_name} succeeded ({elapsed:.0f}s)")
+                return
+            reason = f"command exited with rc={result.rc}"
+        except subprocess.TimeoutExpired as exc:
+            launch_stdout = decode_captured_output(exc.stdout)
+            launch_stderr = decode_captured_output(exc.stderr)
+            reason = f"command timed out after {attempt_timeout}s"
+
+        ended_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        daemon_logs = collect_lxd_daemon_logs(started_str, ended_str)
+
+        last_stdout = launch_stdout
+        last_stderr = launch_stderr
+        last_reason = reason
+        last_daemon_logs = daemon_logs
+
+        log(f"{step_name} failed on attempt {attempt}: {reason}", "ERROR")
+        if launch_stdout:
+            log("Captured command stdout:", "ERROR")
+            print(launch_stdout, flush=True)
+        else:
+            log("Captured command stdout: <empty>", "ERROR")
+        if launch_stderr:
+            log("Captured command stderr:", "ERROR")
+            print(launch_stderr, flush=True)
+        else:
+            log("Captured command stderr: <empty>", "ERROR")
+
+        log(f"LXD daemon logs for failure window [{started_str} .. {ended_str}]", "ERROR")
+        print(daemon_logs, flush=True)
+
+        if attempt < retries and cleanup_cmd is not None:
+            log("Cleaning up potentially partial instance before retry...", "WARN")
+            run_cmd(cleanup_cmd, timeout=180, check=False)
+
+    details = [f"{step_name} failed after {retries} attempts. Last error: {last_reason}"]
+    if last_stdout:
+        details.append(f"Last command stdout:\n{last_stdout}")
+    if last_stderr:
+        details.append(f"Last command stderr:\n{last_stderr}")
+    if last_daemon_logs:
+        details.append(f"LXD daemon logs around last failure:\n{last_daemon_logs}")
+    raise RuntimeError("\n".join(details))
+
+
+def provision_vm(vm_name: str, force_recreate: bool, provision_timeout: int):
     if vm_exists(vm_name):
         if not force_recreate:
             raise RuntimeError(
@@ -163,8 +265,18 @@ def provision_vm(vm_name: str, force_recreate: bool):
         run_cmd(["lxc", "delete", "-f", vm_name], check=True)
         log(f"VM '{vm_name}' deleted")
 
+    prefetch_cmd = ["lxc", "--debug", "--verbose", "image", "copy", "ubuntu:26.04", "local:"]
+    run_lxd_step_with_retries(
+        step_name="Prefetching LXD image 'ubuntu:26.04' into local cache",
+        cmd=prefetch_cmd,
+        retries=3,
+        timeout_seconds=provision_timeout,
+    )
+
     launch_cmd = [
         "lxc",
+        "--debug",
+        "--verbose",
         "launch",
         "ubuntu:26.04",
         vm_name,
@@ -174,57 +286,16 @@ def provision_vm(vm_name: str, force_recreate: bool):
         "-c",
         "limits.memory=8GiB",
     ]
-    last_launch_stdout = ""
-    last_launch_stderr = ""
-    last_reason = ""
-    for attempt in range(1, 4):
-        log(
-            f"Launching VM '{vm_name}' (ubuntu:26.04, limits.cpu=4, limits.memory=8GiB)... "
-            f"attempt {attempt}/3 (timeout=600s)"
-        )
-        t0 = time.monotonic()
-        launch_stdout = ""
-        launch_stderr = ""
-        reason = ""
-        try:
-            result = run_cmd(launch_cmd, timeout=600, check=False)
-            launch_stdout = result.out
-            launch_stderr = result.err
-            if result.rc == 0:
-                log(f"VM '{vm_name}' launched ({time.monotonic() - t0:.0f}s)")
-                return
-            reason = f"lxc launch exited with rc={result.rc}"
-        except subprocess.TimeoutExpired as exc:
-            launch_stdout = decode_captured_output(exc.stdout)
-            launch_stderr = decode_captured_output(exc.stderr)
-            reason = "lxc launch timed out after 600s"
-
-        last_reason = reason
-        last_launch_stdout = launch_stdout
-        last_launch_stderr = launch_stderr
-
-        log(f"Provision attempt {attempt} failed: {reason}", "ERROR")
-        if launch_stdout:
-            log("Captured launch stdout:", "ERROR")
-            print(launch_stdout, flush=True)
-        else:
-            log("Captured launch stdout: <empty>", "ERROR")
-        if launch_stderr:
-            log("Captured launch stderr:", "ERROR")
-            print(launch_stderr, flush=True)
-        else:
-            log("Captured launch stderr: <empty>", "ERROR")
-
-        if attempt < 3:
-            log(f"Cleaning up potentially partial instance '{vm_name}' before retry...", "WARN")
-            run_cmd(["lxc", "delete", "-f", vm_name], timeout=180, check=False)
-
-    details = [f"VM provisioning failed after 3 attempts. Last error: {last_reason}"]
-    if last_launch_stdout:
-        details.append(f"Last launch stdout:\n{last_launch_stdout}")
-    if last_launch_stderr:
-        details.append(f"Last launch stderr:\n{last_launch_stderr}")
-    raise RuntimeError("\n".join(details))
+    run_lxd_step_with_retries(
+        step_name=(
+            f"Launching VM '{vm_name}' (ubuntu:26.04, limits.cpu=4, limits.memory=8GiB)"
+        ),
+        cmd=launch_cmd,
+        retries=3,
+        timeout_seconds=provision_timeout,
+        first_attempt_timeout_multiplier=2,
+        cleanup_cmd=["lxc", "delete", "-f", vm_name],
+    )
 
 
 def wait_for_guest(vm_name: str, timeout_seconds: int):
@@ -591,6 +662,12 @@ def main():
     parser.add_argument("--force-recreate", action="store_true", help="Delete existing VM before launch")
     parser.add_argument("--skip-prep", action="store_true", help="Skip one-time host/guest prep stage")
     parser.add_argument("--wait-timeout", type=int, default=300)
+    parser.add_argument(
+        "--provision-timeout",
+        type=int,
+        default=600,
+        help="Timeout in seconds for each provisioning step attempt (default: 600)",
+    )
     parser.add_argument("--retries", type=int, default=5)
     parser.add_argument("--retry-delay", type=int, default=10)
     parser.add_argument("--attempt-timeout", type=int, default=420)
@@ -628,6 +705,7 @@ def main():
     log(f"vm_name       : {args.vm_name}")
     log(f"iterations    : {args.iterations} per mode")
     log(f"skip_prep     : {args.skip_prep}")
+    log(f"provision_timeout: {args.provision_timeout}s")
     log(f"wait_timeout  : {args.wait_timeout}s  retries={args.retries}  retry_delay={args.retry_delay}s")
     log(f"attempt_timeout: {args.attempt_timeout}s")
     log(f"post_reboot_delay: {args.post_reboot_delay}s")
@@ -656,7 +734,7 @@ def main():
             sys.exit(1)
         log("Passwordless sudo on host: OK")
 
-    provision_vm(args.vm_name, args.force_recreate)
+    provision_vm(args.vm_name, args.force_recreate, args.provision_timeout)
     wait_for_guest(args.vm_name, args.wait_timeout)
 
     if not args.skip_prep:
