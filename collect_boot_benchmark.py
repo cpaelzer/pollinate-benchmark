@@ -282,13 +282,13 @@ def provision_vm(vm_name: str, force_recreate: bool, provision_timeout: int):
         vm_name,
         "--vm",
         "-c",
-        "limits.cpu=4",
+        "limits.cpu=2",
         "-c",
-        "limits.memory=8GiB",
+        "limits.memory=2GiB",
     ]
     run_lxd_step_with_retries(
         step_name=(
-            f"Launching VM '{vm_name}' (ubuntu:26.04, limits.cpu=4, limits.memory=8GiB)"
+            f"Launching VM '{vm_name}' (ubuntu:26.04, limits.cpu=2, limits.memory=2GiB)"
         ),
         cmd=launch_cmd,
         retries=3,
