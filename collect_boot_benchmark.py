@@ -115,6 +115,16 @@ def run_cmd(cmd, *, input_text: Optional[str] = None, timeout: Optional[int] = N
     return CmdResult(p.returncode, p.stdout, p.stderr)
 
 
+def decode_captured_output(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 def run_with_retries(fn, retries: int, delay_seconds: int, description: str):
     last_err = None
     for idx in range(1, retries + 1):
@@ -185,8 +195,8 @@ def provision_vm(vm_name: str, force_recreate: bool):
                 return
             reason = f"lxc launch exited with rc={result.rc}"
         except subprocess.TimeoutExpired as exc:
-            launch_stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-            launch_stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            launch_stdout = decode_captured_output(exc.stdout)
+            launch_stderr = decode_captured_output(exc.stderr)
             reason = "lxc launch timed out after 600s"
 
         last_reason = reason
@@ -197,9 +207,13 @@ def provision_vm(vm_name: str, force_recreate: bool):
         if launch_stdout:
             log("Captured launch stdout:", "ERROR")
             print(launch_stdout, flush=True)
+        else:
+            log("Captured launch stdout: <empty>", "ERROR")
         if launch_stderr:
             log("Captured launch stderr:", "ERROR")
             print(launch_stderr, flush=True)
+        else:
+            log("Captured launch stderr: <empty>", "ERROR")
 
         if attempt < 3:
             log(f"Cleaning up potentially partial instance '{vm_name}' before retry...", "WARN")
