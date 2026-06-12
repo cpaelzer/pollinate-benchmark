@@ -1,0 +1,30 @@
+job_queue: QUEUE_NAME
+tags:
+  - ubuntu-server
+provision_data:
+  distro: resolute
+output_timeout: 10800
+test_data:
+  test_cmds: |
+    # Agent preparation
+    sudo DEBIAN_FRONTEND=noninteractive apt update
+    sudo DEBIAN_FRONTEND=noninteractive apt install rsync -y
+    mkdir -p artifacts
+    # Debug access while running
+    ssh $DEVICE_IP ssh-import-id paelzer
+    # Setup LXD
+    ssh $DEVICE_IP sudo snap install lxd --channel latest/stable
+    ssh $DEVICE_IP sudo lxd init --minimal
+    # Get benchmark code
+    ssh $DEVICE_IP git clone https://github.com/cpaelzer/pollinate-benchmark.git
+    # Store CPU type in artifacts
+    ssh $DEVICE_IP "lscpu > ~/cpu-details.log"
+    rsync -av --ignore-missing-args -e ssh ubuntu@$DEVICE_IP:~/cpu-details.log artifacts/
+    # Run benchmark and store results in artifacts
+    ssh $DEVICE_IP "cd pollinate-benchmark; ./collect_boot_benchmark.py --iterations 120 --force-recreate | tee ~/execution-details.log"
+    rsync -av --ignore-missing-args -e ssh ubuntu@$DEVICE_IP:~/pollinate-benchmark/benchmark-data artifacts/
+    rsync -av --ignore-missing-args -e ssh ubuntu@$DEVICE_IP:~/execution-details.log artifacts/
+#reserve_data:
+#  ssh_keys:
+#    - lp:paelzer
+#  timeout: 21600

@@ -1,0 +1,32 @@
+#!/bin/bash
+# tfgen - generate a Testflinger job file for a given queue name.
+#
+# Usage:
+#   testflinger-cli submit -p $(tfgen <queuename>)
+#
+# The script fills QUEUE_NAME in tf-template.yaml, writes the result to a
+# local file named tf-<queuename>-<datetime>.yaml, and prints the file path
+# so that testflinger-cli can pick it up directly.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE="$SCRIPT_DIR/tf-template.yaml"
+
+if [[ $# -ne 1 ]]; then
+    echo "Usage: tfgen <queuename>" >&2
+    exit 1
+fi
+
+QUEUE_NAME="$1"
+
+if [[ ! -f "$TEMPLATE" ]]; then
+    echo "tfgen: template not found: $TEMPLATE" >&2
+    exit 1
+fi
+
+OUTFILE="$SCRIPT_DIR/tf-run-${QUEUE_NAME}-$(date +%Y%m%dT%H%M%S).yaml"
+
+sed "s/QUEUE_NAME/$QUEUE_NAME/" "$TEMPLATE" > "$OUTFILE"
+
+echo "$OUTFILE"
