@@ -183,15 +183,16 @@ def collect_lxd_daemon_logs(start_ts: str, end_ts: str) -> str:
 
 def get_image_fingerprint(image_ref: str, timeout_seconds: int) -> str:
     result = run_cmd(
-        ["lxc", "image", "info", image_ref, "--format=json"],
+        ["lxc", "image", "info", image_ref],
         timeout=timeout_seconds,
         check=True,
     )
-    payload = json.loads(result.out)
-    fingerprint = str(payload.get("fingerprint", "")).strip()
-    if not fingerprint:
-        raise RuntimeError(f"Could not determine fingerprint for image reference '{image_ref}'")
-    return fingerprint
+    for line in result.out.splitlines():
+        if line.startswith("Fingerprint:"):
+            fingerprint = line.split(":", 1)[1].strip()
+            if fingerprint:
+                return fingerprint
+    raise RuntimeError(f"Could not determine fingerprint for image reference '{image_ref}'")
 
 
 def run_lxd_step_with_retries(
