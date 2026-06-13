@@ -266,9 +266,9 @@ def provision_vm(vm_name: str, force_recreate: bool, provision_timeout: int):
         run_cmd(["lxc", "delete", "-f", vm_name], check=True)
         log(f"VM '{vm_name}' deleted")
 
-    prefetch_cmd = ["lxc", "--verbose", "image", "copy", "ubuntu:26.04", "local:", "--vm", "--copy-aliases"]
+    prefetch_cmd = ["lxc", "--verbose", "image", "copy", "ubuntu:22.04", "local:", "--vm", "--copy-aliases"]
     run_lxd_step_with_retries(
-        step_name="Prefetching LXD VM image 'ubuntu:26.04' with aliases into local cache",
+        step_name="Prefetching LXD VM image 'ubuntu:22.04' with aliases into local cache",
         cmd=prefetch_cmd,
         retries=3,
         timeout_seconds=provision_timeout,
@@ -278,7 +278,7 @@ def provision_vm(vm_name: str, force_recreate: bool, provision_timeout: int):
         "lxc",
         "--verbose",
         "launch",
-        "26.04",
+        "22.04",
         vm_name,
         "--vm",
         "-c",
@@ -288,7 +288,7 @@ def provision_vm(vm_name: str, force_recreate: bool, provision_timeout: int):
     ]
     run_lxd_step_with_retries(
         step_name=(
-            f"Launching VM '{vm_name}' (26.04, limits.cpu=2, limits.memory=2GiB)"
+            f"Launching VM '{vm_name}' (22.04, limits.cpu=2, limits.memory=2GiB)"
         ),
         cmd=launch_cmd,
         retries=3,
