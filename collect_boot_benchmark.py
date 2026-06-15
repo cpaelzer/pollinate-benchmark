@@ -42,6 +42,11 @@ echo "==> Halting time synchronization and potential boot warp..."
 sudo -n timedatectl set-ntp false
 sudo -n systemctl stop systemd-timesyncd chrony 2>/dev/null || true
 
+echo "==> Blocking virtio_rng from being loaded..."
+echo 'SUBSYSTEM=="virtio", ACTION=="add", RUN+="/bin/sh -c '\''[ -d /sys/bus/virtio/drivers/virtio_rng/%k ] && echo %k > /sys/bus/virtio/drivers/virtio_rng/unbind'\''"' | sudo -n tee /etc/udev/rules.d/99-disable-virtio-rng.rules > /dev/null
+sudo -n udevadm control --reload-rules
+sudo update-grub
+
 echo "==> Base environment minimized. Ready for benchmark."
 """
 
