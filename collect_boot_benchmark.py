@@ -266,7 +266,7 @@ def run_lxd_step_with_retries(
     raise RuntimeError("\n".join(details))
 
 
-def provision_vm(vm_name: str, force_recreate: bool, provision_timeout: int):
+def provision_vm(vm_name: str, force_recreate: bool, provision_timeout: int, guest_release: str):
     if vm_exists(vm_name):
         if not force_recreate:
             raise RuntimeError(
@@ -276,9 +276,10 @@ def provision_vm(vm_name: str, force_recreate: bool, provision_timeout: int):
         run_cmd(["lxc", "delete", "-f", vm_name], check=True)
         log(f"VM '{vm_name}' deleted")
 
-    prefetch_cmd = ["lxc", "--verbose", "image", "copy", "ubuntu:22.04", "local:", "--vm", "--copy-aliases"]
+    remote_image = f"ubuntu:{guest_release}"
+    prefetch_cmd = ["lxc", "--verbose", "image", "copy", remote_image, "local:", "--vm", "--copy-aliases"]
     run_lxd_step_with_retries(
-        step_name="Prefetching LXD VM image 'ubuntu:22.04' with aliases into local cache",
+        step_name=f"Prefetching LXD VM image '{remote_image}' with aliases into local cache",
         cmd=prefetch_cmd,
         retries=3,
         timeout_seconds=provision_timeout,
@@ -288,7 +289,7 @@ def provision_vm(vm_name: str, force_recreate: bool, provision_timeout: int):
         "lxc",
         "--verbose",
         "launch",
-        "22.04",
+        guest_release,
         vm_name,
         "--vm",
         "-c",
@@ -298,7 +299,7 @@ def provision_vm(vm_name: str, force_recreate: bool, provision_timeout: int):
     ]
     run_lxd_step_with_retries(
         step_name=(
-            f"Launching VM '{vm_name}' (22.04, limits.cpu=2, limits.memory=2GiB)"
+            f"Launching VM '{vm_name}' ({guest_release}, limits.cpu=2, limits.memory=2GiB)"
         ),
         cmd=launch_cmd,
         retries=3,
@@ -698,6 +699,11 @@ def append_jsonl(path: Path, payload: Dict):
 def main():
     parser = argparse.ArgumentParser(description="Collect boot benchmark data for pollinate comparison")
     parser.add_argument("--vm-name", default="testvm")
+    parser.add_argument(
+        "--guest-release",
+        default="26.04",
+        help="Ubuntu image release to launch via LXD (default: 26.04)",
+    )
     parser.add_argument("--iterations", type=int, default=100, help="Target successful runs per mode")
     parser.add_argument("--output-root", default="benchmark-data", help="Root directory for artifacts")
     parser.add_argument("--force-recreate", action="store_true", help="Delete existing VM before launch")
@@ -744,6 +750,7 @@ def main():
     log(f"run_id        : {run_id}")
     log(f"output_dir    : {out_dir}")
     log(f"vm_name       : {args.vm_name}")
+    log(f"guest_release : {args.guest_release}")
     log(f"iterations    : {args.iterations} per mode")
     log(f"skip_prep     : {args.skip_prep}")
     log(f"provision_timeout: {args.provision_timeout}s")
@@ -775,7 +782,7 @@ def main():
             sys.exit(1)
         log("Passwordless sudo on host: OK")
 
-    provision_vm(args.vm_name, args.force_recreate, args.provision_timeout)
+    provision_vm(args.vm_name, args.force_recreate, args.provision_timeout, args.guest_release)
     wait_for_guest(args.vm_name, args.wait_timeout)
 
     if not args.skip_prep:
