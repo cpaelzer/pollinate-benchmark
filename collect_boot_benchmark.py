@@ -525,6 +525,22 @@ def wait_for_boot_completion(vm_name: str, timeout_seconds: int, poll_delay: int
     raise RuntimeError(f"System boot did not fully complete within {timeout_seconds} seconds")
 
 
+def log_guest_file_contents(vm_name: str, label: str, guest_path: str) -> None:
+    result = lxc_guest_cmd(vm_name, f"cat {guest_path}", timeout=30, check=False)
+    value = result.out.strip()
+    if result.rc == 0 and value:
+        log(f"  {label}: {value}")
+        return
+    if result.rc == 0:
+        log(f"  {label}: <empty>", "WARN")
+        return
+    log(
+        f"  {label}: failed to read {guest_path} (rc={result.rc})\n"
+        f"STDOUT:\n{result.out or '<empty>'}\nSTDERR:\n{result.err or '<empty>'}",
+        "WARN",
+    )
+
+
 def collect_one_attempt(
     vm_name: str,
     mode: str,
@@ -591,6 +607,11 @@ def collect_one_attempt(
     check_attempt_budget()
 
     wait_for_boot_completion(vm_name, boot_complete_timeout, boot_complete_poll_delay)
+    check_attempt_budget()
+
+    log("  Collecting hardware RNG state from guest...")
+    log_guest_file_contents(vm_name, "hw_random rng_available", "/sys/class/misc/hw_random/rng_available")
+    log_guest_file_contents(vm_name, "hw_random rng_current", "/sys/class/misc/hw_random/rng_current")
     check_attempt_budget()
 
     log("  Collecting systemd-analyze time...")
