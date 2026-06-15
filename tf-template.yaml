@@ -21,7 +21,7 @@ test_data:
     ssh $DEVICE_IP "lscpu > ~/cpu-details.log"
     rsync -av --ignore-missing-args -e ssh ubuntu@$DEVICE_IP:~/cpu-details.log artifacts/
     # Run benchmark and store results in artifacts
-    ssh $DEVICE_IP "cd pollinate-benchmark; ./collect_boot_benchmark.py --iterations 120 --force-recreate | tee ~/execution-details.log"
+    ssh $DEVICE_IP "cd pollinate-benchmark; ./collect_boot_benchmark.py --iterations 120 --guest-release 26.04 --force-recreate | tee ~/execution-details.log"
     rsync -av --ignore-missing-args -e ssh ubuntu@$DEVICE_IP:~/pollinate-benchmark/benchmark-data artifacts/
     rsync -av --ignore-missing-args -e ssh ubuntu@$DEVICE_IP:~/execution-details.log artifacts/
 #reserve_data:
