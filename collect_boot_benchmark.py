@@ -42,12 +42,17 @@ echo "==> Halting time synchronization and potential boot warp..."
 sudo -n timedatectl set-ntp false
 sudo -n systemctl stop systemd-timesyncd chrony 2>/dev/null || true
 
-echo "==> Blocking virtio_rng from being loaded..."
-echo 'SUBSYSTEM=="virtio", ACTION=="add", RUN+="/bin/sh -c '\''[ -d /sys/bus/virtio/drivers/virtio_rng/%k ] && echo %k > /sys/bus/virtio/drivers/virtio_rng/unbind'\''"' | sudo -n tee /etc/udev/rules.d/99-disable-virtio-rng.rules > /dev/null
-sudo -n udevadm control --reload-rules
-sudo update-grub
-
 echo "==> Base environment minimized. Ready for benchmark."
+"""
+
+GUEST_ONLY_PREP_SCRIPT = """#!/bin/bash
+set -euo pipefail
+echo "==> Blocking virtio_rng from being loaded (guest-only)..."
+sudo -n tee /etc/udev/rules.d/99-disable-virtio-rng.rules > /dev/null << 'UDEV_EOF'
+SUBSYSTEM=="virtio", ACTION=="add", RUN+="/bin/sh -c '[ -d /sys/bus/virtio/drivers/virtio_rng/%k ] && echo %k > /sys/bus/virtio/drivers/virtio_rng/unbind'"
+UDEV_EOF
+sudo -n udevadm control --reload-rules
+echo "==> Guest-only preparation complete."
 """
 
 DURATION_RE = re.compile(r"([0-9]*\.?[0-9]+)(us|ms|s|min|h)")
@@ -343,15 +348,25 @@ def run_prep_stage(
         raise RuntimeError(f"Host preparation script failed (rc={rc})")
     log("=== HOST PREP COMPLETE ===")
 
-    log(f"=== GUEST PREP: running environment minimization script on '{vm_name}' ===")
+    log(f"=== PREP: running environment minimization script on '{vm_name}' ===")
     rc = run_cmd_streaming(
         ["lxc", "exec", vm_name, "--", "bash", "-s"],
         input_text=PREP_SCRIPT,
         timeout=300,
     )
     if rc != 0:
-        raise RuntimeError(f"Guest preparation script failed (rc={rc})")
-    log("=== GUEST PREP COMPLETE ===")
+        raise RuntimeError(f"Preparation script failed (rc={rc})")
+    log("=== PREP COMPLETE ===")
+
+    log(f"=== GUEST-ONLY PREP: running environment minimization script on '{vm_name}' ===")
+    rc = run_cmd_streaming(
+        ["lxc", "exec", vm_name, "--", "bash", "-s"],
+        input_text=GUEST_ONLY_PREP_SCRIPT,
+        timeout=60,
+    )
+    if rc != 0:
+        raise RuntimeError(f"Guest-only preparation script failed (rc={rc})")
+    log("=== GUEST-ONLY PREP COMPLETE ===")
 
     log(f"Rebooting guest '{vm_name}' after prep (reboot command may return non-zero as the connection drops)...")
     reboot_guest_and_wait(
