@@ -4,7 +4,7 @@
 Walks the results/ tree (virtiorng_mode / machine / release) and produces two
 TSV tables paste-ready for Google Sheets:
 
-  Table 1 — Userspace boot time:  no-pollinate vs pollinated mean + stddev
+    Table 1 — Userspace boot time:  no-pollinate vs pollinated median + stddev
   Table 2 — Pollinate CPU usage:  pollinated runs grouped by machine
 
 Usage:
@@ -80,9 +80,14 @@ def _fmt_ns(v) -> str:
     return f"{int(round(v))}" if v is not None else NA
 
 
-def _filtered_mean_stddev(stats: dict):
+def _raw_median_stddev_count(stats: dict):
+    r = stats["raw"]
+    return r["median"], r["stddev"], r["count"]
+
+
+def _filtered_mean(stats: dict):
     f = stats["filtered"]
-    return f["mean"], f["stddev"], f["count"]
+    return f["mean"]
 
 
 # ---------------------------------------------------------------------------
@@ -99,22 +104,27 @@ def build_userspace_rows(leaves, min_retain_fraction, min_retain_count):
         np_stats = mode_stats(np_rows, "userspace_s", min_retain_fraction, min_retain_count)
         p_stats = mode_stats(p_rows, "userspace_s", min_retain_fraction, min_retain_count)
 
-        np_mean, np_std, np_n = _filtered_mean_stddev(np_stats)
-        p_mean, p_std, p_n = _filtered_mean_stddev(p_stats)
+        np_median, np_std, np_n = _raw_median_stddev_count(np_stats)
+        p_median, p_std, p_n = _raw_median_stddev_count(p_stats)
 
-        delta = (p_mean - np_mean) if (p_mean is not None and np_mean is not None) else None
+        np_mean_filtered = _filtered_mean(np_stats)
+        p_mean_filtered = _filtered_mean(p_stats)
+
+        delta = (p_median - np_median) if (p_median is not None and np_median is not None) else None
 
         rows.append({
             "virtiorng": virt_mode,
             "machine": machine,
             "release": release,
             "np_n": np_n,
-            "np_mean_s": np_mean,
+            "np_median_s": np_median,
             "np_stddev_s": np_std,
+            "np_mean_filtered_s": np_mean_filtered,
             "p_n": p_n,
-            "p_mean_s": p_mean,
+            "p_median_s": p_median,
             "p_stddev_s": p_std,
-            "delta_mean_s": delta,
+            "p_mean_filtered_s": p_mean_filtered,
+            "delta_median_s": delta,
         })
     return rows
 
@@ -125,14 +135,16 @@ def build_cpu_rows(leaves, min_retain_fraction, min_retain_count):
     for virt_mode, machine, release, run_dir in leaves:
         p_rows = read_mode_metadata(run_dir / MODE_POLLINATED)
         p_stats = mode_stats(p_rows, "pollinate_cpu_nsec", min_retain_fraction, min_retain_count)
-        mean, std, n = _filtered_mean_stddev(p_stats)
+        median, std, n = _raw_median_stddev_count(p_stats)
+        mean_filtered = _filtered_mean(p_stats)
         rows.append({
             "virtiorng": virt_mode,
             "machine": machine,
             "release": release,
             "n": n,
-            "mean_ns": mean,
+            "median_ns": median,
             "stddev_ns": std,
+            "mean_filtered_ns": mean_filtered,
         })
     # Sort by machine first so same-machine rows are adjacent (easy visual check).
     rows.sort(key=lambda r: (r["machine"], r["virtiorng"], r["release"]))
@@ -145,14 +157,14 @@ def build_cpu_rows(leaves, min_retain_fraction, min_retain_count):
 
 USERSPACE_HEADERS = [
     "virtiorng", "machine", "release",
-    "np_n", "np_mean_s", "np_stddev_s",
-    "p_n", "p_mean_s", "p_stddev_s",
-    "delta_mean_s",
+    "np_n", "np_median_s", "np_stddev_s", "np_mean_filtered_s",
+    "p_n", "p_median_s", "p_stddev_s", "p_mean_filtered_s",
+    "delta_median_s",
 ]
 
 CPU_HEADERS = [
     "virtiorng", "machine", "release",
-    "n", "mean_ns", "stddev_ns",
+    "n", "median_ns", "stddev_ns", "mean_filtered_ns",
 ]
 
 
@@ -220,9 +232,17 @@ def main():
 
     out = open(args.out, "w", encoding="utf-8") if args.out else sys.stdout
     try:
-        userspace_num_keys = {"np_mean_s", "np_stddev_s", "p_mean_s", "p_stddev_s", "delta_mean_s"}
+        userspace_num_keys = {
+            "np_median_s",
+            "np_stddev_s",
+            "np_mean_filtered_s",
+            "p_median_s",
+            "p_stddev_s",
+            "p_mean_filtered_s",
+            "delta_median_s",
+        }
         print_table(
-            "Userspace boot time (seconds) — IQR-filtered mean and stddev",
+            "Userspace boot time (seconds) — raw median/stddev and filtered mean",
             USERSPACE_HEADERS,
             userspace_rows,
             userspace_num_keys,
@@ -231,9 +251,9 @@ def main():
 
         print(file=out)
 
-        cpu_num_keys = {"mean_ns", "stddev_ns"}
+        cpu_num_keys = {"median_ns", "stddev_ns", "mean_filtered_ns"}
         print_table(
-            "Pollinate CPU usage (nanoseconds) — IQR-filtered mean and stddev — pollinated runs only",
+            "Pollinate CPU usage (nanoseconds) — raw median/stddev and filtered mean — pollinated runs only",
             CPU_HEADERS,
             cpu_rows,
             cpu_num_keys,
