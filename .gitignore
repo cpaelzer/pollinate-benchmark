@@ -25,3 +25,5 @@ htmlcov/
 
 # Benchmark artifacts
 benchmark-data/
+archives
+results
