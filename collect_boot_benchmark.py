@@ -45,7 +45,7 @@ sudo -n systemctl stop systemd-timesyncd chrony 2>/dev/null || true
 echo "==> Base environment minimized. Ready for benchmark."
 """
 
-GUEST_ONLY_PREP_SCRIPT = """#!/bin/bash
+DISABLE_VIRTIORNG_IN_GUEST_SCRIPT = """#!/bin/bash
 set -euo pipefail
 echo "==> Blocking virtio_rng from being loaded (guest-only)..."
 sudo -n tee /etc/udev/rules.d/99-disable-virtio-rng.rules > /dev/null << 'UDEV_EOF'
@@ -58,6 +58,7 @@ echo "==> Guest-only preparation complete."
 DURATION_RE = re.compile(r"([0-9]*\.?[0-9]+)(us|ms|s|min|h)")
 MODE_NO_POLLINATE = "no-pollinate"
 MODE_POLLINATED = "pollinated"
+DISABLE_VIRTIORNG_IN_GUEST = False
 
 
 @dataclass
@@ -339,6 +340,7 @@ def run_prep_stage(
     retry_delay: int,
     wait_timeout: int,
     post_reboot_delay: int,
+    disable_virtiorng_in_guest: bool,
 ):
     setup_dir.mkdir(parents=True, exist_ok=True)
 
@@ -359,15 +361,18 @@ def run_prep_stage(
         raise RuntimeError(f"Preparation script failed (rc={rc})")
     log("=== PREP COMPLETE ===")
 
-    log(f"=== GUEST-ONLY PREP: running environment minimization script on '{vm_name}' ===")
-    rc = run_cmd_streaming(
-        ["lxc", "exec", vm_name, "--", "bash", "-s"],
-        input_text=GUEST_ONLY_PREP_SCRIPT,
-        timeout=60,
-    )
-    if rc != 0:
-        raise RuntimeError(f"Guest-only preparation script failed (rc={rc})")
-    log("=== GUEST-ONLY PREP COMPLETE ===")
+    if disable_virtiorng_in_guest:
+        log(f"=== DISABLE_VIRTIORNG_IN_GUEST: applying guest rule on '{vm_name}' ===")
+        rc = run_cmd_streaming(
+            ["lxc", "exec", vm_name, "--", "bash", "-s"],
+            input_text=DISABLE_VIRTIORNG_IN_GUEST_SCRIPT,
+            timeout=60,
+        )
+        if rc != 0:
+            raise RuntimeError(f"DISABLE_VIRTIORNG_IN_GUEST script failed (rc={rc})")
+        log("=== DISABLE_VIRTIORNG_IN_GUEST COMPLETE ===")
+    else:
+        log("=== DISABLE_VIRTIORNG_IN_GUEST SKIPPED ===")
 
     log(f"Rebooting guest '{vm_name}' after prep (reboot command may return non-zero as the connection drops)...")
     reboot_guest_and_wait(
@@ -736,6 +741,16 @@ def main():
         default=5,
         help="Seconds between full-boot completion checks (default: 5)",
     )
+    parser.add_argument(
+        "--disable-virtiorng-in-guest",
+        action="store_true",
+        default=DISABLE_VIRTIORNG_IN_GUEST,
+        dest="disable_virtiorng_in_guest",
+        help=(
+            "Apply guest-only prep to disable virtio_rng in the guest by installing "
+            "the udev unbind rule"
+        ),
+    )
     args = parser.parse_args()
 
     # Restore terminal on exit in case a subprocess (e.g. sudo) left it in raw mode.
@@ -757,6 +772,7 @@ def main():
     log(f"wait_timeout  : {args.wait_timeout}s  retries={args.retries}  retry_delay={args.retry_delay}s")
     log(f"attempt_timeout: {args.attempt_timeout}s")
     log(f"post_reboot_delay: {args.post_reboot_delay}s")
+    log(f"disable_virtiorng_in_guest: {args.disable_virtiorng_in_guest}")
     log(
         f"boot_complete_timeout: {args.boot_complete_timeout}s  "
         f"boot_complete_poll_delay={args.boot_complete_poll_delay}s"
@@ -794,6 +810,7 @@ def main():
             args.retry_delay,
             args.wait_timeout,
             args.post_reboot_delay,
+            args.disable_virtiorng_in_guest,
         )
         log("Prep stage complete; reboot validated. Starting measurement campaign.")
     else:
